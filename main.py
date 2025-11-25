@@ -145,8 +145,7 @@ def reset_prompt_to_default() -> None:
 # Page config
 # -------------------------
 st.set_page_config(
-    page_title="SAE Steering Playground",
-    page_icon="🧠",
+    page_title="Steering GPT 2 Thoughts",
     layout="wide",
 )
 
@@ -156,7 +155,7 @@ if "prompt_text" not in st.session_state:
 if "selected_preset" not in st.session_state:
     st.session_state.selected_preset = list(PROMPT_PRESETS.keys())[0]
 
-st.title("SAE Steering Playground")
+st.title("Steering GPT 2 Thoughts' Playground")
 st.caption("See the base run next to a lightly steered run.")
 
 hero_left, hero_right = st.columns([3, 2], gap="large")

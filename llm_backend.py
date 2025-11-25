@@ -36,6 +36,7 @@ def _get_device() -> str:
 
 
 DEVICE = _get_device()
+print(f"[llm_backend] Using device: {DEVICE}, dtype: {DTYPE}, and model: {MODEL_NAME}.")
 
 # Neuronpedia feature ids for this SAE
 FEATURE_IDS: Dict[str, int] = {
