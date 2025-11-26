@@ -73,7 +73,10 @@ def render_sidebar() -> Tuple[str, int, float, float]:
         st.header("Generation settings")
         st.caption("Pick how long and playful the writing should be.")
         st.info(
-            f"Model: {AVAILABLE_MODELS[DEFAULT_MODEL_KEY]}\nDevice: {get_device()}"
+            f"Model: {AVAILABLE_MODELS[DEFAULT_MODEL_KEY]}"
+        )
+        st.info(
+            f"Device: {str(get_device()).upper()}"
         )
         model_key = DEFAULT_MODEL_KEY
 
@@ -291,30 +294,12 @@ def run_app() -> None:
 
     maybe_login_to_hub()
 
-    st.set_page_config(page_title="SAE Steering Playground", layout="wide")
+    st.set_page_config(page_title="GPT-2's Thoughts Steering Playground", layout="wide")
 
     if "prompt_text" not in st.session_state:
         st.session_state.prompt_text = ""
-
-    st.title("SAE Steering Playground")
-
-    hero_left, hero_right = st.columns([3, 2], gap="large")
-    with hero_left:
-        st.markdown("### Try gentle tweaks")
-        st.markdown(
-            "- Type a short prompt and watch the model keep writing.\n"
-            "- Slide one control at a time to see how the tone changes.\n"
-            "- Keep the version you enjoy the most."
-        )
-    with hero_right:
-        st.markdown("### How to use it")
-        st.markdown(
-            "1. Type a prompt.\n"
-            "2. Pick how many tokens and how wild it should be.\n"
-            "3. Move a slider, hit **Generate**, and read both results."
-        )
-
-    st.divider()
+    
+    st.title("GPT-2's Thoughts Steering Playground")
 
     selections = render_sidebar()
 
