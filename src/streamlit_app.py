@@ -72,13 +72,15 @@ def render_sidebar() -> Tuple[str, int, float, float]:
     with st.sidebar:
         st.header("Generation settings")
         st.caption("Pick how long and playful the writing should be.")
-        st.info(
-            f"Model: {AVAILABLE_MODELS[DEFAULT_MODEL_KEY]}"
+        model_key = st.selectbox(
+            "Base model",
+            options=list(AVAILABLE_MODELS.keys()),
+            index=list(AVAILABLE_MODELS.keys()).index(DEFAULT_MODEL_KEY),
+            format_func=lambda key: AVAILABLE_MODELS[key],
         )
         st.info(
-            f"Device: {str(get_device()).upper()}"
+            f"Running {AVAILABLE_MODELS[model_key]} on {get_device().upper()}"
         )
-        model_key = DEFAULT_MODEL_KEY
 
         max_tokens = st.slider(
             "Max new tokens",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Callable, Dict, Mapping, Optional, Tuple
 
@@ -13,6 +14,7 @@ from config import AVAILABLE_MODELS, DEFAULT_MODEL_KEY, MODEL_CONFIGS, ModelConf
 
 HookFn = Callable[[Tensor, HookPoint], Tensor]
 ALPHA_EPSILON = 1e-6
+HTML_TAG_PATTERN = re.compile(r"</?(?!bos\b)[^>]+>")
 
 
 def _get_device() -> str:
@@ -115,7 +117,7 @@ def _generate_text(
     top_p: float,
     hook_fn: Optional[HookFn],
     hook_point: Optional[str],
-    end_tokens: Tuple[str, ...],
+    cleanup_tokens: Tuple[str, ...],
 ) -> str:
     """Decode text while optionally inserting a steering hook on the fly.
 
@@ -127,7 +129,7 @@ def _generate_text(
         top_p: Nucleus sampling cut-off.
         hook_fn: Optional function applied at ``hook_point`` each forward pass.
         hook_point: Name of the hook location inside the model graph.
-        end_tokens: Tuple of strings that should be stripped from raw output.
+        cleanup_tokens: Tuple of strings that should be stripped from raw output.
 
     Returns:
         Cleaned text string produced by the model.
@@ -153,9 +155,10 @@ def _generate_text(
                 out_tokens = model.generate(**generation_kwargs)
 
     text = model.to_string(out_tokens[0])
-    for token in end_tokens:
+    for token in cleanup_tokens:
         if token:
             text = text.replace(token, "")
+    text = HTML_TAG_PATTERN.sub("", text)
     return text.strip()
 
 
@@ -251,7 +254,7 @@ def generate_baseline(
         top_p=top_p,
         hook_fn=None,
         hook_point=None,
-        end_tokens=config["end_tokens"],
+        cleanup_tokens=config["cleanup_tokens"],
     )
 
 
@@ -294,7 +297,7 @@ def generate_steered(
         top_p=top_p,
         hook_fn=hook_fn,
         hook_point=config["hook_point"],
-        end_tokens=config["end_tokens"],
+        cleanup_tokens=config["cleanup_tokens"],
     )
 
 

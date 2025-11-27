@@ -22,7 +22,7 @@ class ModelConfig(TypedDict):
     sae_id: str
     feature_ids: Dict[str, int]
     dtype: torch.dtype
-    end_tokens: Tuple[str, ...]
+    cleanup_tokens: Tuple[str, ...]
     preload: bool
 
 
@@ -45,22 +45,44 @@ def _require_env(key: str) -> str:
     return value
 
 
+def _prefixed_env(prefix: str, suffix: str) -> str:
+    """Fetch environment variables such as ``GPT2_MODEL_NAME``."""
+
+    return _require_env(f"{prefix}_{suffix}")
+
+
 MODEL_CONFIGS: Dict[str, ModelConfig] = {
     "gpt2": {
         "key": "gpt2",
         "label": "GPT-2 Small",
-        "model_name": _require_env("MODEL_NAME"),
-        "hook_point": _require_env("HOOK_POINT"),
-        "sae_release": _require_env("SAE_RELEASE"),
-        "sae_id": _require_env("SAE_ID"),
+        "model_name": _prefixed_env("GPT2", "MODEL_NAME"),
+        "hook_point": _prefixed_env("GPT2", "HOOK_POINT"),
+        "sae_release": _prefixed_env("GPT2", "SAE_RELEASE"),
+        "sae_id": _prefixed_env("GPT2", "SAE_ID"),
         "feature_ids": {
             "shakespeare": 14599,
             "flavors": 15952,
             "math": 15255,
         },
         "dtype": torch.float32,
-        "end_tokens": ("<|endoftext|>",),
+        "cleanup_tokens": ("<|endoftext|>", "<|bos|>", "<bos>", "</s>"),
         "preload": True,
+    },
+    "gemma": {
+        "key": "gemma",
+        "label": "Gemma 2B",
+        "model_name": _prefixed_env("GEMMA", "MODEL_NAME"),
+        "hook_point": _prefixed_env("GEMMA", "HOOK_POINT"),
+        "sae_release": _prefixed_env("GEMMA", "SAE_RELEASE"),
+        "sae_id": _prefixed_env("GEMMA", "SAE_ID"),
+        "feature_ids": {
+            "shakespeare": 28765,
+            "flavors": 13307,
+            "math": 22111,
+        },
+        "dtype": torch.float16,
+        "cleanup_tokens": ("</s>", "<bos>", "<s>", "<|endoftext|>"),
+        "preload": False,
     },
 }
 
