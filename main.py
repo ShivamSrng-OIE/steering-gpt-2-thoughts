@@ -1,306 +1,17 @@
 ﻿import torch
-import pandas as pd
-import numpy as np
 import altair as alt
 import streamlit as st
-from transformer_lens import HookedTransformer
-from sae_lens import SAE
-from tqdm.auto import tqdm  # <- tqdm for terminal progress
-
-# --------------------------------------------------
-# 1. Global config (concepts + SAE feature indices)
-# --------------------------------------------------
-FEATURES = {
-    "Shakespeare": {
-        "index": 14599,
-        "prompt": "To be or not to be, that is the",
-        "description": "Pushes the model toward Shakespearean style and content.",
-    },
-    "Flavors": {
-        "index": 15952,
-        "prompt": "The ice cream shop sold many",
-        "description": "Tasting notes, flavor words, sensory descriptions.",
-    },
-    "Math": {
-        "index": 15255,
-        "prompt": "The solution to the equation is",
-        "description": "Math notation, formulas, LaTeX-style symbols.",
-    },
-    "Programming": {
-        "index": 4545,
-        "prompt": "def compute_factorial(n):",
-        "description": "Code syntax, programming concepts, function definitions.",
-    },
-}
-
-HOOK_POINT = "blocks.5.hook_resid_pre"
+from llm_steering import *
 
 
-# -----------------------------------
-# 2. Load model + SAE (cached once)
-# -----------------------------------
 @st.cache_resource
-def load_model_and_sae():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # globally turn off grads for this script
-    torch.set_grad_enabled(False)
-
-    model = HookedTransformer.from_pretrained("gpt2-small", device=device)
-
-    # Try newer helper first, fall back for older sae_lens
-    try:
-        sae, cfg_dict, sparsity = SAE.from_pretrained_with_cfg_and_sparsity(
-            release="gpt2-small-res-jb",
-            sae_id="blocks.5.hook_resid_pre",
-            device=device,
-        )
-    except AttributeError:
-        sae, cfg_dict, sparsity = SAE.from_pretrained(
-            release="gpt2-small-res-jb",
-            sae_id="blocks.5.hook_resid_pre",
-            device=device,
-        )
-
-    return model, sae, device
+def get_model_and_sae():
+    """Cache the heavy model + SAE load for the Streamlit session."""
+    return load_model_and_sae()
 
 
 # -----------------------------------
-# 3. Steering + generation utilities
-# -----------------------------------
-def get_steering_hook(steering_vector: torch.Tensor, coefficient: float):
-    """
-    Hook that adds (coefficient * steering_vector)
-    to the residual stream at HOOK_POINT, on the last token.
-    """
-
-    def hook(resid_pre, hook):
-        # resid_pre: [batch, seq_len, d_model]
-        v = steering_vector.to(device=resid_pre.device, dtype=resid_pre.dtype)
-        resid_pre = resid_pre.clone()
-        resid_pre[:, -1, :] += v * coefficient
-        return resid_pre
-
-    return hook
-
-
-def generate_text(
-    model: HookedTransformer,
-    prompt: str,
-    steering_vector: torch.Tensor | None,
-    coefficient: float,
-    max_new_tokens: int = 80,
-    temperature: float = 1.0,
-) -> str:
-    """
-    Generate text from a prompt, optionally applying steering at HOOK_POINT.
-    """
-    tokens = model.to_tokens(prompt)
-
-    gen_kwargs = dict(
-        input=tokens,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=1,
-        do_sample=True,
-        stop_at_eos=False,
-        verbose=False,
-    )
-
-    with torch.no_grad():
-        if steering_vector is None or coefficient == 0.0:
-            out_tokens = model.generate(**gen_kwargs)
-        else:
-            steering_hook = get_steering_hook(steering_vector, coefficient)
-            with model.hooks(fwd_hooks=[(HOOK_POINT, steering_hook)]):
-                out_tokens = model.generate(**gen_kwargs)
-
-    text = model.to_string(out_tokens[0])
-    return text.replace("\n", "\\n").replace("<|endoftext|>", "").strip()
-
-
-def get_next_token_logprobs(
-    model: HookedTransformer,
-    prompt: str,
-    steering_vector: torch.Tensor | None,
-    coefficient: float,
-) -> torch.Tensor:
-    """
-    Return log-probabilities over the next token (single step).
-    """
-    tokens = model.to_tokens(prompt)
-
-    with torch.no_grad():
-        if steering_vector is None or coefficient == 0.0:
-            logits = model(tokens)  # [batch, seq_len, vocab]
-        else:
-            steering_hook = get_steering_hook(steering_vector, coefficient)
-            with model.hooks(fwd_hooks=[(HOOK_POINT, steering_hook)]):
-                logits = model(tokens)
-
-        last_logits = logits[0, -1, :]  # [vocab]
-        logprobs = torch.log_softmax(last_logits, dim=-1)
-
-    return logprobs
-
-
-def build_nll_dataframe(
-    model: HookedTransformer,
-    sae: SAE,
-    feature_idx: int,
-    prompt: str,
-    coeff: float,
-    top_k: int = 20,
-) -> pd.DataFrame:
-    """
-    DataFrame with baseline vs steered NLL for the top_k tokens under baseline.
-    (Unused in the new UI, kept for a single next-token chart if needed.)
-    """
-    steering_vector = sae.W_dec[feature_idx]
-
-    base_lp = get_next_token_logprobs(model, prompt, None, 0.0)
-    steer_lp = get_next_token_logprobs(model, prompt, steering_vector, coeff)
-
-    base_nll = (-base_lp).detach().cpu().numpy()
-    steer_nll = (-steer_lp).detach().cpu().numpy()
-
-    top_idx = np.argsort(base_nll)[:top_k]
-
-    rows = []
-    for tid in top_idx:
-        token_str = model.tokenizer.decode([int(tid)])
-        rows.append(
-            {"Token": token_str, "Run": "Baseline", "NLL": float(base_nll[tid])}
-        )
-        rows.append(
-            {
-                "Token": token_str,
-                "Run": f"Steered (α={coeff:.1f})",
-                "NLL": float(steer_nll[tid]),
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-# -----------------------------
-# Top-p sampling helper
-# -----------------------------
-def sample_top_p_from_logprobs(logprobs: torch.Tensor, top_p: float = 0.9) -> int:
-    """
-    Sample a token id from log-probs using nucleus (top-p) sampling.
-    """
-    probs = torch.exp(logprobs)
-    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-    cumulative = torch.cumsum(sorted_probs, dim=0)
-
-    cutoff_mask = cumulative <= top_p
-    cutoff_mask[0] = True
-    cutoff_idx = cutoff_mask.nonzero(as_tuple=False)[-1].item()
-
-    keep_probs = sorted_probs[: cutoff_idx + 1]
-    keep_indices = sorted_indices[: cutoff_idx + 1]
-
-    keep_probs = keep_probs / keep_probs.sum()
-    choice = torch.multinomial(keep_probs, 1).item()
-    return int(keep_indices[choice])
-
-
-# -----------------------------
-# Stepwise generation (shared prefix)
-# -----------------------------
-def generate_stepwise_dists_same_prefix(
-    model: HookedTransformer,
-    prompt: str,
-    steering_vector: torch.Tensor | None,
-    coeff: float,
-    max_new_tokens: int,
-    temperature: float = 1.0,
-    top_p: float = 0.9,
-    progress_callback=None,
-):
-    """
-    Generate a sequence by sampling from the baseline distribution,
-    but at each step also record logprobs under both:
-      - baseline (no steering)
-      - steered (with feature + coeff)
-
-    progress_callback(step_idx, total_steps) is called each iteration if provided.
-    """
-    tokens = model.to_tokens(prompt)  # [1, seq]
-    base_steps = []
-    steer_steps = []
-
-    # tqdm bar in the terminal logs
-    for step in tqdm(range(max_new_tokens), desc="Per-token NLL steps", leave=False):
-        with torch.no_grad():
-            # Baseline distribution
-            logits_base = model(tokens)
-            last_logits_base = logits_base[0, -1, :]
-            scaled_base = last_logits_base / temperature
-            logprobs_base = torch.log_softmax(scaled_base, dim=-1)
-
-            # Steered distribution (same prefix)
-            if steering_vector is not None and coeff != 0.0:
-                steering_hook = get_steering_hook(steering_vector, coeff)
-                with model.hooks(fwd_hooks=[(HOOK_POINT, steering_hook)]):
-                    logits_steer = model(tokens)
-                last_logits_steer = logits_steer[0, -1, :]
-                scaled_steer = last_logits_steer / temperature
-                logprobs_steer = torch.log_softmax(scaled_steer, dim=-1)
-            else:
-                logprobs_steer = logprobs_base.clone()
-
-        base_steps.append(logprobs_base.detach().cpu())
-        steer_steps.append(logprobs_steer.detach().cpu())
-
-        # Update Streamlit progress bar if provided
-        if progress_callback is not None:
-            progress_callback(step + 1, max_new_tokens)
-
-        # Sample next token from baseline
-        next_token_id = sample_top_p_from_logprobs(logprobs_base, top_p=top_p)
-        next_token_tensor = torch.tensor([[next_token_id]], device=tokens.device)
-        tokens = torch.cat([tokens, next_token_tensor], dim=1)
-
-    return tokens[0].cpu().tolist(), base_steps, steer_steps
-
-
-# -----------------------------
-# Build per-step NLL dataframe
-# -----------------------------
-def build_step_nll_df(
-    model: HookedTransformer,
-    base_logprobs: torch.Tensor,
-    steered_logprobs: torch.Tensor,
-    top_k: int = 20,
-) -> pd.DataFrame:
-    """
-    For ONE step, return Token / Run / NLL for top_k tokens.
-    """
-    base_lp = base_logprobs.detach().numpy()
-    steer_lp = steered_logprobs.detach().numpy()
-
-    base_nll = -base_lp
-    steer_nll = -steer_lp
-
-    top_idx = np.argsort(base_nll)[:top_k]
-
-    rows = []
-    for tid in top_idx:
-        token_str = model.tokenizer.decode([int(tid)])
-        rows.append(
-            {"Token": token_str, "Run": "Baseline", "NLL": float(base_nll[tid])}
-        )
-        rows.append(
-            {"Token": token_str, "Run": "Steered", "NLL": float(steer_nll[tid])}
-        )
-
-    return pd.DataFrame(rows)
-
-
-# -----------------------------------
-# 4. Streamlit UI
+# Streamlit UI
 # -----------------------------------
 def main():
     st.set_page_config(
@@ -352,7 +63,7 @@ def main():
     st.divider()
 
     # Load heavy stuff once
-    model, sae, device = load_model_and_sae()
+    model, sae, device = get_model_and_sae()
     st.sidebar.success(f"Model loaded on **{device.upper()}**")
 
     # Sidebar controls
@@ -365,12 +76,18 @@ def main():
     )
     concept = FEATURES[concept_name]
 
+    manual_seed_enabled = st.sidebar.checkbox(
+        "Lock randomness (manual seed 0)",
+        value=True,
+        help="When enabled, both runs use the same RNG seed so differences come only from steering.",
+    )
+    
     coeff = st.sidebar.slider(
         "Steering strength α",
         min_value=-120.0,
         max_value=120.0,
         value=0.0,
-        step=5.0,
+        step=1.0,
         help="Negative values suppress the feature. Positive values amplify it.",
     )
 
@@ -379,7 +96,7 @@ def main():
         min_value=5,
         max_value=100,  # larger range
         value=20,
-        step=5,
+        step=1,
     )
 
     temperature = st.sidebar.slider(
@@ -422,7 +139,10 @@ def main():
                 coeff_norm,
                 text=f"{direction} (α from −120 to +120)",
             )
-            st.caption("Matched sampling keeps randomness constant between runs.")
+            if manual_seed_enabled:
+                st.caption("Matched sampling keeps randomness constant between runs.")
+            else:
+                st.caption("Random seed unlocked — expect natural sampling variation between runs.")
 
         st.divider()
 
@@ -439,7 +159,7 @@ def main():
         run_button = st.button(
             "Generate and analyze",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
         st.divider()
@@ -450,7 +170,8 @@ def main():
                 steering_vector = sae.W_dec[feature_idx]
 
                 # Fix seed so differences in text are due to steering, not randomness
-                torch.manual_seed(0)
+                if manual_seed_enabled:
+                    torch.manual_seed(0)
                 baseline = generate_text(
                     model,
                     prompt=prompt,
@@ -460,7 +181,8 @@ def main():
                     temperature=temperature,
                 )
 
-                torch.manual_seed(0)
+                if manual_seed_enabled:
+                    torch.manual_seed(0)
                 steered = generate_text(
                     model,
                     prompt=prompt,
@@ -522,7 +244,7 @@ def main():
                     )
 
                     # Finished
-                    progress_bar.progress(1.0, text="Per-token NLL collection done ✅")
+                    progress_bar.progress(1.0, text="Per-token NLL collection done!")
                     progress_bar.empty()
 
                     # Separate prompt tokens vs generated tokens
@@ -577,7 +299,7 @@ def main():
                                         height=max(24 * top_k, 260),
                                     )
                                 )
-                                st.altair_chart(chart, use_container_width=True)
+                                st.altair_chart(chart, width="stretch")
         elif not prompt.strip():
             st.info("Please enter a prompt first, then click Generate and analyze.")
         else:
